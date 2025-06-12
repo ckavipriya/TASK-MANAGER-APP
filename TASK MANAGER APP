@@ -1,0 +1,275 @@
+# TASK-MANAGER-APPimport React, { useState, useEffect } from 'react';
+import { initializeApp } from 'firebase/app';
+import {
+  getAuth,
+  signInAnonymously,
+  signInWithCustomToken,
+  onAuthStateChanged,
+} from 'firebase/auth';
+import {
+  getFirestore,
+  collection,
+  addDoc,
+  updateDoc,
+  deleteDoc,
+  doc,
+  onSnapshot,
+  query,
+  serverTimestamp,
+} from 'firebase/firestore';
+
+// Global variables provided by the Canvas environment
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+const firebaseConfig = JSON.parse(
+  typeof __firebase_config !== 'undefined'
+    ? __firebase_config
+    : '{}'
+);
+const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+// Main App Component
+function App() {
+  const [tasks, setTasks] = useState([]);
+  const [newTask, setNewTask] = useState('');
+  const [db, setDb] = useState(null);
+  const [auth, setAuth] = useState(null);
+  const [userId, setUserId] = useState(null);
+  const [isAuthReady, setIsAuthReady] = useState(false);
+  const [showConfirmModal, setShowConfirmModal] = useState(false);
+  const [taskToDelete, setTaskToDelete] = useState(null);
+
+  useEffect(() => {
+    // Initialize Firebase
+    if (Object.keys(firebaseConfig).length === 0) {
+      console.error('Firebase config is empty. Cannot initialize Firebase.');
+      return;
+    }
+
+    try {
+      const app = initializeApp(firebaseConfig);
+      const firestore = getFirestore(app);
+      const authentication = getAuth(app);
+      setDb(firestore);
+      setAuth(authentication);
+
+      // Listen for authentication state changes
+      const unsubscribeAuth = onAuthStateChanged(authentication, async (user) => {
+        if (user) {
+          setUserId(user.uid);
+        } else {
+          // Sign in anonymously if no user is authenticated and no custom token is available
+          try {
+            if (initialAuthToken) {
+              await signInWithCustomToken(authentication, initialAuthToken);
+            } else {
+              await signInAnonymously(authentication);
+            }
+          } catch (error) {
+            console.error('Error during anonymous sign-in:', error);
+          }
+        }
+        setIsAuthReady(true); // Mark authentication as ready
+      });
+
+      return () => unsubscribeAuth(); // Cleanup auth listener
+    } catch (error) {
+      console.error('Error initializing Firebase:', error);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!db || !isAuthReady || !userId) {
+      return; // Wait for DB and auth to be ready
+    }
+
+    // Set up real-time listener for tasks
+    const tasksCollectionRef = collection(db, `artifacts/${appId}/public/data/tasks`);
+    const q = query(tasksCollectionRef); // You can add orderBy here if needed, but per instructions, sort in memory
+
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const tasksData = snapshot.docs.map((doc) => ({
+        id: doc.id,
+        ...doc.data(),
+      }));
+      // Sort tasks by creation time (newest first) in memory
+      setTasks(tasksData.sort((a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0)));
+    }, (error) => {
+      console.error('Error fetching tasks:', error);
+    });
+
+    return () => unsubscribe(); // Cleanup snapshot listener
+  }, [db, isAuthReady, userId]);
+
+  // Handle adding a new task
+  const handleAddTask = async () => {
+    if (newTask.trim() === '' || !db || !userId) return;
+
+    try {
+      await addDoc(collection(db, `artifacts/${appId}/public/data/tasks`), {
+        text: newTask,
+        completed: false,
+        createdAt: serverTimestamp(),
+        userId: userId, // Store the userId with the task
+      });
+      setNewTask(''); // Clear input after adding
+    } catch (e) {
+      console.error('Error adding document: ', e);
+    }
+  };
+
+  // Handle toggling task completion status
+  const handleToggleComplete = async (taskId, completedStatus) => {
+    if (!db) return;
+    try {
+      const taskRef = doc(db, `artifacts/${appId}/public/data/tasks`, taskId);
+      await updateDoc(taskRef, {
+        completed: !completedStatus,
+      });
+    } catch (e) {
+      console.error('Error updating document: ', e);
+    }
+  };
+
+  // Show confirmation modal before deleting
+  const handleDeleteClick = (task) => {
+    setTaskToDelete(task);
+    setShowConfirmModal(true);
+  };
+
+  // Handle deleting a task
+  const confirmDeleteTask = async () => {
+    if (!db || !taskToDelete) return;
+    try {
+      await deleteDoc(doc(db, `artifacts/${appId}/public/data/tasks`, taskToDelete.id));
+      setShowConfirmModal(false);
+      setTaskToDelete(null);
+    } catch (e) {
+      console.error('Error deleting document: ', e);
+    }
+  };
+
+  const cancelDelete = () => {
+    setShowConfirmModal(false);
+    setTaskToDelete(null);
+  };
+
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-purple-600 to-indigo-800 p-4 font-sans text-gray-100 flex items-center justify-center">
+      <div className="bg-gray-800 p-8 rounded-2xl shadow-2xl w-full max-w-2xl transform transition-all duration-300 hover:scale-[1.02] border border-indigo-700">
+        <h1 className="text-4xl font-extrabold text-center mb-8 text-transparent bg-clip-text bg-gradient-to-r from-teal-400 to-blue-500">
+          My Task Manager
+        </h1>
+
+        {userId && (
+          <p className="text-center text-sm text-gray-400 mb-6">
+            Logged in as: <span className="font-mono bg-gray-700 px-2 py-1 rounded-md text-purple-300 select-all">{userId}</span>
+          </p>
+        )}
+
+        <div className="flex flex-col sm:flex-row gap-4 mb-8">
+          <input
+            type="text"
+            className="flex-grow p-4 rounded-xl bg-gray-700 text-white placeholder-gray-400 border border-gray-600 focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all duration-200"
+            placeholder="Add a new task..."
+            value={newTask}
+            onChange={(e) => setNewTask(e.target.value)}
+            onKeyPress={(e) => {
+              if (e.key === 'Enter') {
+                handleAddTask();
+              }
+            }}
+          />
+          <button
+            onClick={handleAddTask}
+            className="p-4 bg-blue-600 hover:bg-blue-700 active:bg-blue-800 text-white rounded-xl font-bold shadow-lg transition-all duration-200 transform hover:-translate-y-0.5 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-opacity-75"
+          >
+            Add Task
+          </button>
+        </div>
+
+        {tasks.length === 0 && (
+          <p className="text-center text-gray-400 text-lg py-10">No tasks yet! Add one above.</p>
+        )}
+
+        <ul className="space-y-4">
+          {tasks.map((task) => (
+            <li
+              key={task.id}
+              className={`flex items-center justify-between p-4 rounded-xl shadow-md transition-all duration-300 ease-in-out ${
+                task.completed ? 'bg-green-700/30 line-through text-gray-400' : 'bg-gray-700'
+              } border border-gray-600`}
+            >
+              <span className="text-lg flex-grow break-words pr-4">
+                {task.text}
+                {task.createdAt && (
+                  <span className="block text-xs text-gray-500 mt-1">
+                    Added: {new Date(task.createdAt.seconds * 1000).toLocaleString()}
+                  </span>
+                )}
+              </span>
+              <div className="flex items-center space-x-2">
+                <button
+                  onClick={() => handleToggleComplete(task.id, task.completed)}
+                  className={`p-3 rounded-full shadow-lg transition-all duration-200 transform hover:scale-110 focus:outline-none focus:ring-2 focus:ring-offset-2 ${
+                    task.completed
+                      ? 'bg-green-500 hover:bg-green-600 focus:ring-green-500'
+                      : 'bg-yellow-500 hover:bg-yellow-600 focus:ring-yellow-500'
+                  }`}
+                  aria-label={task.completed ? 'Mark as incomplete' : 'Mark as complete'}
+                >
+                  <svg
+                    xmlns="http://www.w3.org/2000/svg"
+                    className="h-5 w-5 text-white"
+                    viewBox="0 0 20 20"
+                    fill="currentColor"
+                  >
+                    {task.completed ? (
+                      <path
+                        fillRule="evenodd"
+                        d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z"
+                        clipRule="evenodd"
+                      />
+                    ) : (
+                      <path
+                        fillRule="evenodd"
+                        d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z"
+                        clipRule="evenodd"
+                      />
+                    )}
+                  </svg>
+                </button>
+                <button
+                  onClick={() => handleDeleteClick(task)}
+                  className="p-3 bg-red-600 hover:bg-red-700 active:bg-red-800 text-white rounded-full shadow-lg transition-all duration-200 transform hover:scale-110 focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-opacity-75"
+                  aria-label="Delete task"
+                >
+                  <svg
+                    xmlns="http://www.w3.org/2000/svg"
+                    className="h-5 w-5"
+                    viewBox="0 0 20 20"
+                    fill="currentColor"
+                  >
+                    <path
+                      fillRule="evenodd"
+                      d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm6 0a1 1 0 11-2 0v6a1 1 0 112 0V8z"
+                      clipRule="evenodd"
+                    />
+                  </svg>
+                </button>
+              </div>
+            </li>
+          ))}
+        </ul>
+
+        {/* Confirmation Modal */}
+        {showConfirmModal && (
+          <div className="fixed inset-0 bg-black bg-opacity-70 flex items-center justify-center p-4 z-50">
+            <div className="bg-gray-900 p-8 rounded-2xl shadow-2xl max-w-sm w-full text-center border border-purple-700">
+              <h3 className="text-2xl font-bold text-red-400 mb-4">Confirm Deletion</h3>
+              <p className="text-gray-300 mb-6">
+                Are you sure you want to delete the task: <br />"
+                <span className="font-semibold text-white">
+                  {taskToDelete?.text}
+                </span>
+                "?
+              
